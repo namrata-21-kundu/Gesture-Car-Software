@@ -20,6 +20,7 @@ from car_controller import CarController
 from mapping_engine import MappingEngine
 from autonomous_navigator import AutonomousNavigator
 from map_widget import Map2DWidget
+from map_ml_processor import MapMLProcessor
 from ui import MainWindow
 import config
 
@@ -383,6 +384,94 @@ def run_all_tests():
     record_test("MainWindow GUI Has Mapping Tab", hasattr(window, "tab_mapping") and window.tab_mapping is not None)
     record_test("MainWindow GUI Has Map2DWidget", hasattr(window, "map_2d_widget") and window.map_2d_widget is not None)
     record_test("MainWindow Mapping Area Label Present", hasattr(window, "lbl_map_area"))
+
+    # --------------------------------------------------------------------------
+    # SUITE 10: ML MAP REFINEMENT & INTERACTIVE ROUTE NAVIGATION
+    # --------------------------------------------------------------------------
+    print("\n--- [SUITE 10] ML Map Perception & Interactive Route Following ---")
+
+    # 1. MapMLProcessor Spatial Learning Pipeline
+    ml_proc = MapMLProcessor(resolution_cm=4.0)
+    record_test("MapMLProcessor Initialized", ml_proc is not None)
+
+    # Create synthetic grid with a straight wall and an obstacle box
+    grid_w, grid_h = 100, 100
+    mock_grid = np.full((grid_h, grid_w), 0.5, dtype=np.float32)
+    mock_grid[30:70, 30:70] = 0.0  # Free corridor space
+    mock_grid[25:27, 20:80] = 1.0  # Top wall
+    mock_grid[73:75, 20:80] = 1.0  # Bottom wall
+    mock_grid[45:55, 45:55] = 1.0  # Center obstacle block
+
+    ml_out = ml_proc.process_grid(mock_grid)
+    record_test("ML Perception Pipeline Output Dict Keys", "walls" in ml_out and "safe_corridors" in ml_out and "obstacle_clusters" in ml_out)
+    record_test("ML Vector Wall Extraction (Douglas-Peucker Polyline)", len(ml_out["walls"]) >= 2)
+    record_test("ML Obstacle K-Means Clustering", len(ml_out["obstacle_clusters"]) >= 1)
+    record_test("ML Medial Axis Distance Transform Safe Corridors", len(ml_out["safe_corridors"]) > 0)
+
+    # 2. Collision Raycaster Check
+    has_collision = ml_proc.check_path_collision((-30.0, 0.0), (30.0, 0.0), mock_grid)
+    record_test("Collision Raycaster Detects Center Obstacle", has_collision is True)
+    free_path = ml_proc.check_path_collision((-30.0, 50.0), (30.0, 50.0), mock_grid)
+    record_test("Collision Raycaster Confirms Free Path in Corridor", free_path is False)
+
+    # 3. MappingEngine ML Refinement API
+    refined_ml = map_eng.refine_map_with_ml()
+    record_test("MappingEngine.refine_map_with_ml() Output Valid", isinstance(refined_ml, dict) and "walls" in refined_ml)
+
+    # 4. Map2DWidget Route Drawing & Coordinate Transformations
+    test_widget = Map2DWidget(map_eng)
+    test_widget.resize(600, 600)
+    test_widget.set_draw_route_mode(True)
+    record_test("Map2DWidget Draw Route Mode Active", test_widget.draw_route_mode is True)
+
+    # Test coordinate transformation invertibility
+    world_in_x, world_in_y = 50.0, -30.0
+    sx, sy = test_widget.world_to_screen(world_in_x, world_in_y, 600, 600)
+    world_out_x, world_out_y = test_widget.screen_to_world(sx, sy, 600, 600)
+    record_test("Coordinate Transform Invertibility (Screen <-> World)", abs(world_in_x - world_out_x) < 0.1 and abs(world_in_y - world_out_y) < 0.1)
+
+    # Test adding and clearing waypoints
+    test_widget._add_waypoint(0.0, 50.0)
+    test_widget._add_waypoint(50.0, 50.0)
+    test_widget._add_waypoint(50.0, 0.0)
+    drawn_pts = test_widget.get_drawn_route()
+    record_test("Map2DWidget Route Waypoint Accumulation (3 points)", len(drawn_pts) == 3)
+
+    test_widget.clear_drawn_route()
+    record_test("Map2DWidget Clear Route (0 points)", len(test_widget.get_drawn_route()) == 0)
+
+    # 5. AutonomousNavigator Route Following Execution
+    route_waypoints = [(0.0, 40.0), (40.0, 40.0), (0.0, 0.0)]
+    nav_start_ok = nav.start_following_route(route_waypoints)
+    record_test("Start Following Route Command Accepted", nav_start_ok is True)
+    record_test("Navigator Mode Enters AUTONOMOUS", nav.current_mode == AutonomousNavigator.MODE_AUTONOMOUS)
+    record_test("Navigator State Enters FOLLOWING_ROUTE", nav.current_state == AutonomousNavigator.STATE_FOLLOWING_ROUTE)
+
+    # Advance through waypoints
+    nav.mapping_engine.robot_x = 0.0
+    nav.mapping_engine.robot_y = 38.0  # within 15cm of (0, 40)
+    nav.update_navigation(dt=0.1)
+    record_test("Waypoint 1 Progression Advance", nav.current_waypoint_idx >= 1)
+
+    nav.stop_following_route()
+    record_test("Stop Following Route Reverts to IDLE State", nav.current_state == AutonomousNavigator.STATE_IDLE)
+
+    # 6. MainWindow Route & ML Toolbar Controls
+    record_test("MainWindow GUI Has Draw Route Button", hasattr(window, "btn_draw_route"))
+    record_test("MainWindow GUI Has Execute Route Button", hasattr(window, "btn_execute_route"))
+    record_test("MainWindow GUI Has Clear Route Button", hasattr(window, "btn_clear_route"))
+    record_test("MainWindow GUI Has ML Refine Button", hasattr(window, "btn_ml_refine"))
+    record_test("MainWindow GUI Has Route Status Label", hasattr(window, "lbl_route_status"))
+    record_test("MainWindow GUI Has Route Points Telemetry Label", hasattr(window, "lbl_route_points_info"))
+
+    # Test GUI actions
+    window.btn_draw_route.setChecked(True)
+    record_test("MainWindow Draw Route Toggle Enables Drawing", window.map_2d_widget.draw_route_mode is True)
+    window.btn_draw_route.setChecked(False)
+    record_test("MainWindow Draw Route Toggle Disables Drawing", window.map_2d_widget.draw_route_mode is False)
+
+    window._on_ml_refine_clicked()
+    record_test("MainWindow ML Refine Execution Updates Sidebar", "walls" in window.lbl_ml_walls_info.text().lower())
 
     # Clean Exit
     detector.close()

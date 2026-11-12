@@ -192,6 +192,7 @@ class MainWindow(QMainWindow):
         self.autonomous_navigator.mode_changed.connect(self._on_nav_mode_changed)
         self.autonomous_navigator.state_changed.connect(self._on_nav_state_changed)
         self.autonomous_navigator.status_message.connect(self._on_nav_status_message)
+        self.autonomous_navigator.waypoint_reached.connect(self._on_waypoint_reached)
         self.mapping_engine.pose_updated.connect(self._on_mapping_pose_updated)
         self.mapping_engine.map_updated.connect(self._on_mapping_stats_updated)
 
@@ -523,6 +524,41 @@ class MainWindow(QMainWindow):
         r2_layout.addWidget(self.btn_reset_map)
 
         tb_layout.addLayout(r2_layout)
+
+        # Row 3: ML Perception & Interactive Route Drawing
+        r3_layout = QHBoxLayout()
+        r3_layout.setSpacing(8)
+
+        lbl_route = QLabel("ROUTE & ML:")
+        lbl_route.setStyleSheet("font-size: 11px; font-weight: 800; color: #94A3B8; letter-spacing: 0.5px;")
+        r3_layout.addWidget(lbl_route)
+
+        self.btn_ml_refine = QPushButton("🧠 ML Map Refine")
+        self.btn_ml_refine.setStyleSheet("background-color: #1E3A8A; color: #60A5FA; border: 1px solid #3B82F6; font-weight: bold; border-radius: 6px;")
+        self.btn_ml_refine.clicked.connect(self._on_ml_refine_clicked)
+        r3_layout.addWidget(self.btn_ml_refine)
+
+        self.btn_draw_route = QPushButton("✏️ Draw Route")
+        self.btn_draw_route.setCheckable(True)
+        self.btn_draw_route.toggled.connect(self._on_toggle_draw_route)
+        r3_layout.addWidget(self.btn_draw_route)
+
+        self.btn_execute_route = QPushButton("🚀 Execute Route")
+        self.btn_execute_route.setStyleSheet("background-color: #064E3B; color: #34D399; border: 1px solid #10B981; font-weight: bold; border-radius: 6px;")
+        self.btn_execute_route.clicked.connect(self._on_execute_route)
+        r3_layout.addWidget(self.btn_execute_route)
+
+        self.btn_clear_route = QPushButton("🗑️ Clear Route")
+        self.btn_clear_route.clicked.connect(self._on_clear_route)
+        r3_layout.addWidget(self.btn_clear_route)
+
+        r3_layout.addStretch()
+
+        self.lbl_route_status = QLabel("Route: 0 waypoints")
+        self.lbl_route_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #F59E0B;")
+        r3_layout.addWidget(self.lbl_route_status)
+
+        tb_layout.addLayout(r3_layout)
         layout.addWidget(toolbar_card)
 
         # ----------------------------------------------------
@@ -533,6 +569,7 @@ class MainWindow(QMainWindow):
 
         # 2D Map Widget
         self.map_2d_widget = Map2DWidget(self.mapping_engine)
+        self.map_2d_widget.route_updated.connect(self._on_route_updated)
         split_layout.addWidget(self.map_2d_widget, stretch=3)
 
         # Mapping Telemetry Sidebar
@@ -643,6 +680,34 @@ class MainWindow(QMainWindow):
         prog_box.addWidget(self.lbl_map_cells)
 
         map_side_layout.addWidget(card_progress)
+
+        # Card 5: ML Map & Route Telemetry
+        card_route = QFrame()
+        card_route.setProperty("class", "Card")
+        route_box = QVBoxLayout(card_route)
+        route_box.setContentsMargins(10, 8, 10, 8)
+        route_box.setSpacing(4)
+        route_box.addWidget(self._create_metric_header("ML MAP & ROUTE PLANNER"))
+
+        route_grid = QGridLayout()
+        route_grid.addWidget(QLabel("Drawn Route:"), 0, 0)
+        self.lbl_route_points_info = QLabel("0 points")
+        self.lbl_route_points_info.setStyleSheet("font-weight: bold; color: #F59E0B;")
+        route_grid.addWidget(self.lbl_route_points_info, 0, 1)
+
+        route_grid.addWidget(QLabel("ML Walls:"), 1, 0)
+        self.lbl_ml_walls_info = QLabel("Unrefined")
+        self.lbl_ml_walls_info.setStyleSheet("font-weight: bold; color: #00E5FF;")
+        route_grid.addWidget(self.lbl_ml_walls_info, 1, 1)
+
+        route_grid.addWidget(QLabel("ML Corridors:"), 2, 0)
+        self.lbl_ml_corridors_info = QLabel("Unrefined")
+        self.lbl_ml_corridors_info.setStyleSheet("font-weight: bold; color: #10B981;")
+        route_grid.addWidget(self.lbl_ml_corridors_info, 2, 1)
+
+        route_box.addLayout(route_grid)
+        map_side_layout.addWidget(card_route)
+
         map_side_layout.addStretch()
 
         split_layout.addLayout(map_side_layout, stretch=1)
@@ -680,6 +745,7 @@ class MainWindow(QMainWindow):
             AutonomousNavigator.STATE_BACKING: ("● BACKING UP", "#2E1417", "#EF4444"),
             AutonomousNavigator.STATE_PAUSED: ("● PAUSED", "#291E14", "#F59E0B"),
             AutonomousNavigator.STATE_HOMING: ("● RETURNING TO START (0, 0)", "#142E35", "#00E5FF"),
+            AutonomousNavigator.STATE_FOLLOWING_ROUTE: ("● FOLLOWING USER ROUTE", "#291E14", "#F59E0B"),
         }
         text, bg, col = badge_styles.get(state, ("● " + state, "#141A24", "#94A3B8"))
         self.lbl_nav_state_badge.setText(text)
@@ -703,6 +769,90 @@ class MainWindow(QMainWindow):
             self.lbl_map_area.setText(f"{area_m2:.2f} m² Explored")
             self.bar_map_coverage.setValue(int(pct))
             self.lbl_map_cells.setText(f"{explored} / {total} grid cells surveyed ({pct:.1f}%)")
+
+    def _on_toggle_draw_route(self, checked):
+        """Toggles interactive waypoint mouse drawing on the 2D occupancy grid."""
+        self.map_2d_widget.set_draw_route_mode(checked)
+        if checked:
+            self.btn_draw_route.setStyleSheet("background-color: #F59E0B; color: #000000; font-weight: bold; border-radius: 6px;")
+            self.lbl_nav_status_msg.setText("✏️ Route drawing active: Click anywhere on the map to place waypoints.")
+            self._on_ws_log("SYSTEM", "Route drawing mode enabled. Click on 2D map to place waypoints.")
+        else:
+            self.btn_draw_route.setStyleSheet("")
+            self.lbl_nav_status_msg.setText("Route drawing mode disabled.")
+
+    def _on_route_updated(self, route):
+        """Live updates waypoint count and total trajectory distance."""
+        n_pts = len(route)
+        self.lbl_route_status.setText(f"Route: {n_pts} waypoints")
+        if hasattr(self, "lbl_route_points_info"):
+            if n_pts == 0:
+                self.lbl_route_points_info.setText("0 points")
+            else:
+                total_len = 0.0
+                rx, ry, _ = self.mapping_engine.get_robot_pose()
+                prev_x, prev_y = rx, ry
+                for wx, wy in route:
+                    total_len += math.hypot(wx - prev_x, wy - prev_y)
+                    prev_x, prev_y = wx, wy
+                self.lbl_route_points_info.setText(f"{n_pts} pts ({total_len:.1f} cm)")
+
+    def _on_execute_route(self):
+        """Commands autonomous path tracking along the user's drawn waypoints."""
+        route = self.map_2d_widget.get_drawn_route()
+        if not route:
+            self.lbl_nav_status_msg.setText("⚠️ No route drawn! Click '✏️ Draw Route' and click points on map.")
+            self._on_ws_log("SAFETY", "Cannot execute route: No waypoints drawn.")
+            return
+
+        success = self.autonomous_navigator.start_following_route(route)
+        if success:
+            if self.btn_draw_route.isChecked():
+                self.btn_draw_route.setChecked(False)
+            self.lbl_nav_status_msg.setText(f"🚀 Navigating drawn route: {len(route)} waypoints.")
+            self._on_ws_log("SYSTEM", f"Started following user route with {len(route)} waypoints.")
+        else:
+            self.lbl_nav_status_msg.setText("⚠️ Failed to start route navigation. Check safety/mode.")
+
+    def _on_clear_route(self):
+        """Clears user waypoints and stops active route following."""
+        self.map_2d_widget.clear_drawn_route()
+        if self.autonomous_navigator.current_state == AutonomousNavigator.STATE_FOLLOWING_ROUTE:
+            self.autonomous_navigator.stop_following_route()
+        self.lbl_route_status.setText("Route: 0 waypoints")
+        if hasattr(self, "lbl_route_points_info"):
+            self.lbl_route_points_info.setText("0 points")
+        self.lbl_nav_status_msg.setText("🗑️ User route cleared.")
+        self._on_ws_log("SYSTEM", "User route cleared.")
+
+    def _on_ml_refine_clicked(self):
+        """Runs the MapMLProcessor spatial learning pipeline to refine walls & corridors."""
+        self.lbl_nav_status_msg.setText("🧠 Running ML Spatial Perception...")
+        ml_data = self.mapping_engine.refine_map_with_ml()
+        self.map_2d_widget.set_ml_map_overlay(ml_data)
+
+        n_walls = len(ml_data.get("walls", []))
+        n_clusters = len(ml_data.get("obstacle_clusters", []))
+        n_corridors = len(ml_data.get("safe_corridors", []))
+
+        msg = f"🧠 ML Refinement Complete: {n_walls} walls, {n_clusters} clusters, {n_corridors} corridor points."
+        self.lbl_nav_status_msg.setText(msg)
+        self._on_ws_log("SYSTEM", msg)
+
+        if hasattr(self, "lbl_ml_walls_info"):
+            self.lbl_ml_walls_info.setText(f"{n_walls} walls")
+        if hasattr(self, "lbl_ml_corridors_info"):
+            self.lbl_ml_corridors_info.setText(f"{n_corridors} corridor pts")
+
+    def _on_waypoint_reached(self, idx, total):
+        """Progress callback from AutonomousNavigator as waypoints are achieved."""
+        self.map_2d_widget.set_active_waypoint_idx(idx)
+        if idx >= total:
+            self.lbl_nav_status_msg.setText(f"🏁 Route finished! Reached all {total} waypoints.")
+            self._on_ws_log("SYSTEM", f"Route complete: all {total} waypoints reached.")
+        else:
+            self.lbl_nav_status_msg.setText(f"🎯 Waypoint {idx}/{total} reached, steering to next...")
+            self._on_ws_log("SYSTEM", f"Reached waypoint {idx}/{total}.")
 
     def _build_tab_telemetry(self):
         layout = QVBoxLayout(self.tab_telemetry)

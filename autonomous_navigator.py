@@ -12,9 +12,10 @@ import config
 class AutonomousNavigator(QObject):
     # Signals for UI notifications
     mode_changed = Signal(str)         # "MANUAL" or "AUTONOMOUS"
-    state_changed = Signal(str)        # "IDLE", "EXPLORING", "SCANNING", "TURNING", "AVOIDING", "PAUSED"
+    state_changed = Signal(str)        # "IDLE", "EXPLORING", "SCANNING", "TURNING", "AVOIDING", "PAUSED", "FOLLOWING_ROUTE"
     command_dispatched = Signal(str)   # 'F', 'B', 'L', 'R', 'S'
     status_message = Signal(str)       # Descriptive status for dashboard
+    waypoint_reached = Signal(int, int) # (reached_index, total_waypoints)
 
     # Modes
     MODE_MANUAL = "MANUAL"
@@ -29,6 +30,7 @@ class AutonomousNavigator(QObject):
     STATE_BACKING = "BACKING"
     STATE_PAUSED = "PAUSED"
     STATE_HOMING = "HOMING"
+    STATE_FOLLOWING_ROUTE = "FOLLOWING_ROUTE"
 
     def __init__(self, mapping_engine, websocket_manager, car_controller=None):
         super().__init__()
@@ -39,6 +41,10 @@ class AutonomousNavigator(QObject):
         self.current_mode = self.MODE_MANUAL
         self.current_state = self.STATE_IDLE
         self.is_active = False
+
+        # User-Drawn Navigation Route
+        self.planned_route = []
+        self.current_waypoint_idx = 0
 
         # Navigation decision parameters (cm)
         self.safe_distance_cm = 32.0        # Min clearance to move forward
@@ -125,6 +131,27 @@ class AutonomousNavigator(QObject):
         self.action_duration = 0.0
         self.status_message.emit("Returning to starting position (0, 0)...")
 
+    def start_following_route(self, waypoints):
+        """Commands the robot to autonomously navigate along user-drawn waypoints."""
+        if not waypoints or len(waypoints) == 0:
+            self.status_message.emit("⚠️ No route drawn! Click '✏️ Draw Route' and draw on map first.")
+            return False
+
+        self.planned_route = list(waypoints)
+        self.current_waypoint_idx = 0
+        self.set_mode(self.MODE_AUTONOMOUS)
+        self.is_active = True
+        self._set_state(self.STATE_FOLLOWING_ROUTE)
+        self.action_start_time = time.time()
+        self.action_duration = 0.0
+        self.status_message.emit(f"🚀 Starting route navigation: {len(self.planned_route)} waypoints.")
+        return True
+
+    def stop_following_route(self):
+        """Aborts planned route navigation."""
+        self.stop_robot()
+        self.status_message.emit("Route navigation stopped.")
+
     def reset_map(self):
         """Resets the occupancy grid map and stops robot."""
         self.stop_robot()
@@ -164,6 +191,10 @@ class AutonomousNavigator(QObject):
             self.websocket_manager.send_command(cmd_char, speed=speed)
         self.mapping_engine.update_odometry(cmd_char)
         self.command_dispatched.emit(cmd_char)
+
+    def update_navigation(self, dt=0.05):
+        """Public manual step tick for deterministic navigation updates & testing."""
+        return self._navigation_loop_tick()
 
     def _navigation_loop_tick(self):
         """
@@ -345,6 +376,66 @@ class AutonomousNavigator(QObject):
             # 3. Drive forward towards home
             self._dispatch_command(config.CMD_FORWARD, speed=200)
             self.status_message.emit(f"Homing: Driving to start ({dist:.1f} cm remaining)")
+
+        # ----------------------------------------------------
+        # STATE: FOLLOWING_ROUTE (User-Drawn Waypoint Path Execution)
+        # ----------------------------------------------------
+        elif self.current_state == self.STATE_FOLLOWING_ROUTE:
+            if not self.planned_route or self.current_waypoint_idx >= len(self.planned_route):
+                self._dispatch_command(config.CMD_STOP)
+                self._set_state(self.STATE_IDLE)
+                self.is_active = False
+                self.status_message.emit("🎉 Destination reached! Planned route successfully completed.")
+                return
+
+            target_wx, target_wy = self.planned_route[self.current_waypoint_idx]
+            rx, ry, heading = self.mapping_engine.get_robot_pose()
+
+            dx = target_wx - rx
+            dy = target_wy - ry
+            dist = math.sqrt(dx * dx + dy * dy)
+
+            # Check if current waypoint reached (within 15cm radius)
+            if dist <= 15.0:
+                self.current_waypoint_idx += 1
+                self.waypoint_reached.emit(self.current_waypoint_idx, len(self.planned_route))
+
+                if self.current_waypoint_idx >= len(self.planned_route):
+                    self._dispatch_command(config.CMD_STOP)
+                    self._set_state(self.STATE_IDLE)
+                    self.is_active = False
+                    self.status_message.emit("🎉 Destination reached! All waypoints completed.")
+                    return
+                else:
+                    target_wx, target_wy = self.planned_route[self.current_waypoint_idx]
+                    dx = target_wx - rx
+                    dy = target_wy - ry
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    self.status_message.emit(f"✓ Reached Waypoint {self.current_waypoint_idx}! Advancing to #{self.current_waypoint_idx + 1}")
+
+            # Calculate bearing to target waypoint
+            target_deg = math.degrees(math.atan2(dy, dx)) % 360.0
+            ang_diff = (target_deg - heading) % 360.0
+            if ang_diff > 180.0:
+                ang_diff -= 360.0
+
+            # 1. Align heading towards waypoint if angle error > 20°
+            if abs(ang_diff) > 20.0:
+                turn_cmd = config.CMD_LEFT if ang_diff > 0 else config.CMD_RIGHT
+                self._dispatch_command(turn_cmd, speed=200)
+                self.status_message.emit(f"Route: Aligning to Waypoint #{self.current_waypoint_idx + 1} ({ang_diff:+.0f}°) | {dist:.0f}cm")
+                return
+
+            # 2. Check laser front clearance
+            effective_center = min(self.center_dist, self.current_dist if abs(self.current_angle - 90) <= 25 else self.center_dist)
+            if effective_center < self.critical_distance_cm:
+                self._dispatch_command(config.CMD_STOP)
+                self.status_message.emit(f"⚠️ Route obstacle detected ({effective_center:.1f}cm)! Pausing for safety...")
+                return
+
+            # 3. Drive forward along route segment
+            self._dispatch_command(config.CMD_FORWARD, speed=200)
+            self.status_message.emit(f"Following Route: Waypoint #{self.current_waypoint_idx + 1} ({dist:.1f}cm away)")
 
     def _trigger_avoidance(self):
         """Halts the robot and activates look-around scanning to find open space to divert."""

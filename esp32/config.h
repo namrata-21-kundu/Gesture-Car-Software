@@ -56,19 +56,24 @@
 #define ACCEL_STEP_PWM 10       // Speed step increment per tick
 #define RAMP_INTERVAL_MS 5      // Smooth 5ms ramp interval (~90ms 0->180 accel)
 
-// SG90 Servo & HC-SR04 Ultrasonic Radar Hardware Pinout
-#define SERVO_PIN 13       // SG90 Servo Signal Pin (D13)
-#define TRIG_PIN 5         // HC-SR04 Ultrasonic Trigger Pin (D5)
-#define ECHO_PIN 19        // HC-SR04 Ultrasonic Echo Pin (D19)
+// VL53L0X Laser Time-of-Flight (ToF) Sensor & SG90 Servo Hardware Pinout
+#define I2C_SDA_PIN 21      // VL53L0X I2C Data Pin (GPIO 21 / D21)
+#define I2C_SCL_PIN 22      // VL53L0X I2C Clock Pin (GPIO 22 / D22)
+#define SERVO_PIN 13        // SG90 Servo Signal Pin (GPIO 13 / D13)
 #define PWM_CHANNEL_SERVO 2 // LEDC Channel for SG90 Servo
+
+// Legacy Ultrasonic Fallback Pins (HC-SR04)
+#define TRIG_PIN 5          // HC-SR04 Trigger Pin (D5)
+#define ECHO_PIN 19         // HC-SR04 Echo Pin (D19)
 
 // Radar & Obstacle Avoidance Configuration Parameters
 #define SERVO_MIN_ANGLE 40         // Rightmost scan angle (degrees)
 #define SERVO_MAX_ANGLE 140        // Leftmost scan angle (degrees)
 #define SERVO_SWEEP_STEP_DEG 5     // Angle increment per sweep step (smooth fluid sweep)
-#define SERVO_STEP_INTERVAL_MS 25  // Non-blocking servo update tick (ms: 25ms * 20 steps = 500ms half-sweep)
+#define SERVO_STEP_INTERVAL_MS 25  // Non-blocking servo update tick (ms)
 
-#define ULTRASONIC_MAX_RANGE_CM 200.0f  // Maximum valid sensing range (cm)
+#define SENSOR_MAX_RANGE_CM 200.0f      // Maximum valid sensing range (cm)
+#define ULTRASONIC_MAX_RANGE_CM 200.0f  // Backward compatibility alias
 #define OBSTACLE_VERY_CLOSE_CM 12.0f    // Emergency stop / collision threshold (12cm)
 #define OBSTACLE_WARNING_CM 28.0f       // Obstacle scan & divert trigger threshold (28cm)
 

@@ -1,11 +1,16 @@
 #include "radar_controller.h"
 #include "config.h"
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
 #include <esp_arduino_version.h>
 
 static int current_angle = 90;
 static unsigned long last_servo_update = 0;
 static unsigned long last_serial_log = 0;
 static bool is_scanning_look_around = false;
+
+static Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+static bool tof_initialized = false;
 
 static float current_dist = 200.0f;
 static float left_dist = 200.0f;
@@ -36,16 +41,27 @@ void updateServo(int angle) {
 
 void initRadar() {
     Serial.println("\n=======================================================");
-    Serial.println("  [RADAR] Initializing Ultrasonic Obstacle Subsystem  ");
+    Serial.println("  [RADAR] Initializing VL53L0X Laser ToF & SG90 Servo  ");
     Serial.println("=======================================================");
-    Serial.printf("[RADAR] Pins: TRIG=GPIO %d, ECHO=GPIO %d, SERVO=GPIO %d\n",
-                  TRIG_PIN, ECHO_PIN, SERVO_PIN);
-    Serial.printf("[RADAR] Warning Threshold: %.0f cm | Critical Threshold: %.0f cm\n",
-                  OBSTACLE_WARNING_CM, OBSTACLE_VERY_CLOSE_CM);
+    Serial.printf("[RADAR] Pins: I2C_SDA=GPIO %d, I2C_SCL=GPIO %d, SERVO=GPIO %d\n",
+                  I2C_SDA_PIN, I2C_SCL_PIN, SERVO_PIN);
+    Serial.printf("[RADAR] Range Limit: %.0f cm | Warning Threshold: %.0f cm\n",
+                  SENSOR_MAX_RANGE_CM, OBSTACLE_WARNING_CM);
 
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);  // Standard INPUT (avoids pull-down degradation of echo pulse)
-    digitalWrite(TRIG_PIN, LOW);
+    // Initialize I2C Bus on GPIO 21 & 22
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
+    // Try booting the VL53L0X Laser Time-of-Flight Sensor
+    if (lox.begin()) {
+        tof_initialized = true;
+        Serial.println("[RADAR] ✅ VL53L0X Laser Time-of-Flight Sensor initialized!");
+    } else {
+        Serial.println("[RADAR] ⚠️ VL53L0X not detected on I2C (check SDA=21, SCL=22, VCC=3.3V/5V, GND).");
+        Serial.println("[RADAR] 💡 Initializing Ultrasonic GPIO fallback pins (TRIG=5, ECHO=19)...");
+        pinMode(TRIG_PIN, OUTPUT);
+        pinMode(ECHO_PIN, INPUT);
+        digitalWrite(TRIG_PIN, LOW);
+    }
 
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
     // ESP32 Arduino Core 3.x Servo PWM setup (50Hz, 16-bit)
@@ -60,26 +76,22 @@ void initRadar() {
     updateServo(90);
     delay(200);
 
-    // Initial test reading with direct timing
+    // Initial test reading
     float test_d = readDistance();
     Serial.printf("[RADAR] Initial Distance Test: %.1f cm (Target: 90° Center)\n", test_d);
-    if (test_d >= ULTRASONIC_MAX_RANGE_CM) {
-        Serial.println("[RADAR] ℹ️ Initial reading is 200cm (Clear / No close obstacle in front).");
+    if (test_d < SENSOR_MAX_RANGE_CM) {
+        Serial.printf("[RADAR] ✅ Sensor surface lock confirmed at %.1f cm!\n", test_d);
     } else {
-        Serial.printf("[RADAR] ✅ Obstacle detected on startup at %.1f cm!\n", test_d);
+        Serial.println("[RADAR] ℹ️ Initial reading is 200cm (Clear / No close obstacle in front).");
     }
 }
 
-/**
- * Microsecond-accurate direct polling measurement for HC-SR04 on ESP32.
- * Completely eliminates pulseIn() Core scheduler desync and task-switching lockups.
- */
 static float readSingleDistanceDirect() {
     // 1. Wait for ECHO pin to be LOW if a previous bounce is lingering
     unsigned long wait_low = micros();
     while (digitalRead(ECHO_PIN) == HIGH) {
         if (micros() - wait_low > 3000) {
-            return ULTRASONIC_MAX_RANGE_CM;
+            return SENSOR_MAX_RANGE_CM;
         }
     }
 
@@ -90,43 +102,53 @@ static float readSingleDistanceDirect() {
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
 
-    // 3. Wait for ECHO to rise HIGH (sensor transmission response)
-    // HC-SR04 emits 8x 40kHz pulses and raises ECHO (~200-400µs). Timeout after 4ms.
+    // 3. Wait for ECHO to rise HIGH
     unsigned long wait_high = micros();
     while (digitalRead(ECHO_PIN) == LOW) {
         if (micros() - wait_high > 4000) {
-            return ULTRASONIC_MAX_RANGE_CM;  // No echo signal received
+            return SENSOR_MAX_RANGE_CM;
         }
     }
 
     // 4. Measure duration while ECHO is HIGH
-    // 25,000 µs = ~430 cm maximum distance range
     unsigned long pulse_start = micros();
     while (digitalRead(ECHO_PIN) == HIGH) {
         if (micros() - pulse_start > 25000) {
-            return ULTRASONIC_MAX_RANGE_CM;  // Out of range (> 400cm)
+            return SENSOR_MAX_RANGE_CM;
         }
     }
     unsigned long duration = micros() - pulse_start;
 
-    // 5. Convert to distance in cm: duration (µs) * speed of sound (0.0343 cm/µs) / 2
+    // 5. Convert to distance in cm
     float raw_cm = (float)duration * 0.0343f / 2.0f;
-    if (raw_cm < 2.0f || raw_cm > ULTRASONIC_MAX_RANGE_CM) {
-        return ULTRASONIC_MAX_RANGE_CM;
+    if (raw_cm < 2.0f || raw_cm > SENSOR_MAX_RANGE_CM) {
+        return SENSOR_MAX_RANGE_CM;
     }
 
     return raw_cm;
 }
 
 float readDistance() {
-    // Dual-sample verification to eliminate single-pulse acoustic dropouts
-    float d1 = readSingleDistanceDirect();
-    if (d1 <= OBSTACLE_WARNING_CM) {
-        // Confirmed obstacle in warning/critical zone: return immediately for zero-lag response!
-        return d1;
+    // 1. Preferred: High-speed, high-precision VL53L0X Laser Time-of-Flight
+    if (tof_initialized) {
+        VL53L0X_RangingMeasurementData_t measure;
+        lox.rangingTest(&measure, false);
+
+        // RangeStatus: 0 = valid range, 4 = out of range
+        if (measure.RangeStatus != 4) {
+            float cm = (float)measure.RangeMilliMeter / 10.0f;
+            if (cm >= 2.0f && cm <= SENSOR_MAX_RANGE_CM) {
+                return cm;
+            }
+        }
+        return SENSOR_MAX_RANGE_CM;
     }
 
-    // If first pulse was clear (>28cm or 200cm), take a quick 2nd reading 6ms later
+    // 2. Fallback: Ultrasonic direct polling
+    float d1 = readSingleDistanceDirect();
+    if (d1 <= OBSTACLE_WARNING_CM) {
+        return d1;
+    }
     delay(6);
     float d2 = readSingleDistanceDirect();
     return min(d1, d2);
@@ -168,30 +190,32 @@ void detectObstacle() {
 
 void scanEnvironment() {
     if (is_scanning_look_around) {
-        return;  // Look-around sweep is currently handling servo movement
+        return;
     }
 
     unsigned long now = millis();
-    if (now - last_servo_update < 40) {  // 25 Hz high-frequency distance sampling
+    if (now - last_servo_update < 40) {  // 25 Hz laser sampling rate
         return;
     }
     last_servo_update = now;
 
-    // Normal State: Park servo centered straight ahead at 90° to monitor vehicle travel path
+    // Normal State: Park servo centered straight ahead at 90°
     if (current_angle != 90) {
         updateServo(90);
     }
 
     current_dist = readDistance();
-    center_dist = current_dist;  // Instant front distance update (no artificial lag)
+    center_dist = current_dist;
 
     detectObstacle();
 
-    // Periodic Serial Monitor heartbeat (every 800ms or immediately when obstacle appears)
+    // Periodic Serial Monitor heartbeat (every 800ms or immediately on obstacle)
     if ((now - last_serial_log >= 800) || (current_dist <= OBSTACLE_WARNING_CM && now - last_serial_log >= 200)) {
         last_serial_log = now;
-        Serial.printf("[RADAR] Angle: %d° | Front Dist: %.1f cm | Status: %s | Best Path: %s\n",
-                      current_angle, current_dist, current_radar_data.status, current_radar_data.best_path);
+        Serial.printf("[RADAR] Angle: %d° | Dist: %.1f cm (%s) | Status: %s | Best Path: %s\n",
+                      current_angle, current_dist,
+                      tof_initialized ? "VL53L0X Laser" : "Ultrasonic",
+                      current_radar_data.status, current_radar_data.best_path);
     }
 }
 

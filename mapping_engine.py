@@ -256,3 +256,13 @@ class MappingEngine(QObject):
         """Returns (x_cm, y_cm, heading_deg)."""
         return self.robot_x, self.robot_y, self.robot_heading
 
+    def refine_map_with_ml(self):
+        """
+        Runs the ML spatial perception model on the active 2D occupancy grid
+        to extract continuous wall contours, obstacle clusters, and safe corridors.
+        """
+        from map_ml_processor import MapMLProcessor
+        proc = MapMLProcessor(self.resolution_cm)
+        return proc.refine_map(self.grid, self.resolution_cm, self.origin_x, self.origin_y)
+
+
