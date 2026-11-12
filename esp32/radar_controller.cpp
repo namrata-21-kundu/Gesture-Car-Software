@@ -1,8 +1,19 @@
 #include "radar_controller.h"
 #include "config.h"
 #include <Wire.h>
-#include <Adafruit_VL53L0X.h>
 #include <esp_arduino_version.h>
+
+#if defined(__has_include)
+  #if __has_include(<Adafruit_VL53L0X.h>)
+    #include <Adafruit_VL53L0X.h>
+    #define HAS_VL53L0X_LIB 1
+  #else
+    #define HAS_VL53L0X_LIB 0
+  #endif
+#else
+  #include <Adafruit_VL53L0X.h>
+  #define HAS_VL53L0X_LIB 1
+#endif
 
 static int current_angle = 90;
 static int sweep_dir = 1;  // +1 = right to left, -1 = left to right
@@ -10,7 +21,9 @@ static unsigned long last_servo_update = 0;
 static unsigned long last_serial_log = 0;
 static bool is_scanning_look_around = false;
 
+#if HAS_VL53L0X_LIB
 static Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+#endif
 static bool tof_initialized = false;
 
 static float current_dist = 200.0f;
@@ -52,6 +65,7 @@ void initRadar() {
     // Initialize I2C Bus on GPIO 21 & 22
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 
+#if HAS_VL53L0X_LIB
     // Try booting the VL53L0X Laser Time-of-Flight Sensor
     if (lox.begin()) {
         tof_initialized = true;
@@ -63,6 +77,13 @@ void initRadar() {
         pinMode(ECHO_PIN, INPUT);
         digitalWrite(TRIG_PIN, LOW);
     }
+#else
+    Serial.println("[RADAR] ⚠️ 'Adafruit_VL53L0X' library not installed in Arduino IDE.");
+    Serial.println("[RADAR] 💡 In Arduino IDE, open Tools > Manage Libraries and install 'Adafruit_VL53L0X'.");
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    digitalWrite(TRIG_PIN, LOW);
+#endif
 
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
     // ESP32 Arduino Core 3.x Servo PWM setup (50Hz, 16-bit)
@@ -130,6 +151,7 @@ static float readSingleDistanceDirect() {
 }
 
 float readDistance() {
+#if HAS_VL53L0X_LIB
     // 1. Preferred: High-speed, high-precision VL53L0X Laser Time-of-Flight
     if (tof_initialized) {
         VL53L0X_RangingMeasurementData_t measure;
@@ -144,6 +166,7 @@ float readDistance() {
         }
         return SENSOR_MAX_RANGE_CM;
     }
+#endif
 
     // 2. Fallback: Ultrasonic direct polling
     float d1 = readSingleDistanceDirect();
