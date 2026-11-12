@@ -339,12 +339,14 @@ def run_all_tests():
     exp_cells, total_cells, pct, area_m2 = map_eng.get_explored_stats()
     record_test("Occupancy Grid Raycasting (Explored Cells > 0)", exp_cells > 0)
     record_test("Occupancy Grid Mapped Area Calculation (> 0 m²)", area_m2 > 0.0)
+    detected_obs = map_eng.get_detected_obstacles()
+    record_test("Detected Obstacle Plotted to Landmark Register", len(detected_obs) > 0 and detected_obs[0]["dist"] == 50.0)
 
     # 4. Map Reset
     map_eng.reset_map()
     rx_r, ry_r, r_head_r = map_eng.get_robot_pose()
     exp_cells_r, _, _, _ = map_eng.get_explored_stats()
-    record_test("Map Reset Clears Pose & Cells", rx_r == 0.0 and ry_r == 0.0 and exp_cells_r == 0)
+    record_test("Map Reset Clears Pose, Cells & Obstacles", rx_r == 0.0 and ry_r == 0.0 and exp_cells_r == 0 and len(map_eng.get_detected_obstacles()) == 0)
 
     # 5. Autonomous Navigator State Machine
     nav = AutonomousNavigator(map_eng, ws_mgr, car_ctrl)
@@ -384,6 +386,7 @@ def run_all_tests():
     record_test("MainWindow GUI Has Mapping Tab", hasattr(window, "tab_mapping") and window.tab_mapping is not None)
     record_test("MainWindow GUI Has Map2DWidget", hasattr(window, "map_2d_widget") and window.map_2d_widget is not None)
     record_test("MainWindow Mapping Area Label Present", hasattr(window, "lbl_map_area"))
+    record_test("MainWindow Mapping Obstacle Count Label Present", hasattr(window, "lbl_map_obs_count"))
 
     # --------------------------------------------------------------------------
     # SUITE 10: ML MAP REFINEMENT & INTERACTIVE ROUTE NAVIGATION

@@ -195,6 +195,7 @@ class MainWindow(QMainWindow):
         self.autonomous_navigator.waypoint_reached.connect(self._on_waypoint_reached)
         self.mapping_engine.pose_updated.connect(self._on_mapping_pose_updated)
         self.mapping_engine.map_updated.connect(self._on_mapping_stats_updated)
+        self.mapping_engine.obstacle_detected.connect(self._on_obstacle_detected)
 
         self._build_ui()
 
@@ -655,6 +656,11 @@ class MainWindow(QMainWindow):
         self.lbl_map_right = QLabel("200 cm")
         sensor_grid.addWidget(self.lbl_map_right, 4, 1)
 
+        sensor_grid.addWidget(QLabel("Obstacles:"), 5, 0)
+        self.lbl_map_obs_count = QLabel("0 plotted")
+        self.lbl_map_obs_count.setStyleSheet("font-weight: bold; color: #10B981;")
+        sensor_grid.addWidget(self.lbl_map_obs_count, 5, 1)
+
         sensor_box.addLayout(sensor_grid)
         map_side_layout.addWidget(card_sensor)
 
@@ -769,6 +775,13 @@ class MainWindow(QMainWindow):
             self.lbl_map_area.setText(f"{area_m2:.2f} m² Explored")
             self.bar_map_coverage.setValue(int(pct))
             self.lbl_map_cells.setText(f"{explored} / {total} grid cells surveyed ({pct:.1f}%)")
+
+    def _on_obstacle_detected(self, x, y, dist):
+        """Live callback when an obstacle is confirmed and plotted on the 2D map."""
+        if hasattr(self, "lbl_map_obs_count"):
+            n = len(self.mapping_engine.detected_obstacles)
+            self.lbl_map_obs_count.setText(f"{n} plotted")
+            self.lbl_map_obs_count.setStyleSheet("font-weight: bold; color: #EF4444;")
 
     def _on_toggle_draw_route(self, checked):
         """Toggles interactive waypoint mouse drawing on the 2D occupancy grid."""

@@ -13,6 +13,7 @@ class MappingEngine(QObject):
     # Signals for UI notifications
     map_updated = Signal()
     pose_updated = Signal(float, float, float)  # (x_cm, y_cm, heading_deg)
+    obstacle_detected = Signal(float, float, float)  # (x_cm, y_cm, dist_cm)
 
     def __init__(self, width_m=6.0, height_m=6.0, resolution_cm=4.0):
         super().__init__()
@@ -36,10 +37,13 @@ class MappingEngine(QObject):
         # P_free = 0.35 -> l_free ~ -0.62
         # P_occ = 0.85  -> l_occ ~ +1.73
         self.L_FREE = -0.45
-        self.L_OCC = 0.95
+        self.L_OCC = 1.6   # Elevated confidence so detected objects appear promptly
         self.L_MIN = -4.0  # Cap free space confidence
         self.L_MAX = 4.0   # Cap obstacle confidence
         self.log_odds_grid = np.zeros((self.grid_height, self.grid_width), dtype=np.float32)
+
+        # Active detected obstacle landmarks list: dicts with {x, y, dist, angle, time, hits}
+        self.detected_obstacles = []
 
         # Robot Pose: x (cm), y (cm), heading (degrees: 90 = facing up along +Y)
         self.robot_x = 0.0
@@ -67,6 +71,7 @@ class MappingEngine(QObject):
         """Clears the 2D occupancy grid, robot path, and resets pose to origin."""
         self.grid.fill(0.5)
         self.log_odds_grid.fill(0.0)
+        self.detected_obstacles.clear()
         self.robot_x = 0.0
         self.robot_y = 0.0
         self.robot_heading = 90.0
@@ -210,8 +215,36 @@ class MappingEngine(QObject):
             if 0 <= c < self.grid_width and 0 <= r < self.grid_height:
                 self.log_odds_grid[r, c] = max(self.L_MIN, self.log_odds_grid[r, c] + self.L_FREE)
 
-        # Occupied endpoint cell (if an obstacle was physically detected within range)
+        # Occupied endpoint cell & active obstacle tracking
         if has_obstacle:
+            # Track detected obstacle landmark in world space
+            if distance_cm <= 195.0:
+                now = time.time()
+                found = False
+                for obs in self.detected_obstacles:
+                    if math.hypot(obs["x"] - obs_world_x, obs["y"] - obs_world_y) < 10.0:
+                        obs["x"] = 0.6 * obs["x"] + 0.4 * obs_world_x
+                        obs["y"] = 0.6 * obs["y"] + 0.4 * obs_world_y
+                        obs["dist"] = distance_cm
+                        obs["angle"] = servo_angle_deg
+                        obs["time"] = now
+                        obs["hits"] = obs.get("hits", 1) + 1
+                        found = True
+                        break
+                if not found:
+                    self.detected_obstacles.append({
+                        "x": obs_world_x,
+                        "y": obs_world_y,
+                        "dist": distance_cm,
+                        "angle": servo_angle_deg,
+                        "time": now,
+                        "hits": 1
+                    })
+                    if len(self.detected_obstacles) > 250:
+                        self.detected_obstacles.pop(0)
+
+                self.obstacle_detected.emit(obs_world_x, obs_world_y, distance_cm)
+
             obs_cells = [line_cells[-1]]
             # Also thicken obstacle slightly (3x3 kernel around hit) for robust visualization
             oc, or_ = line_cells[-1]
@@ -255,6 +288,10 @@ class MappingEngine(QObject):
     def get_robot_pose(self):
         """Returns (x_cm, y_cm, heading_deg)."""
         return self.robot_x, self.robot_y, self.robot_heading
+
+    def get_detected_obstacles(self):
+        """Returns list of active detected obstacle objects with world coordinates and distances."""
+        return list(self.detected_obstacles)
 
     def refine_map_with_ml(self):
         """

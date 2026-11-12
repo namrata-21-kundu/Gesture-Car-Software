@@ -5,6 +5,7 @@
 #include <esp_arduino_version.h>
 
 static int current_angle = 90;
+static int sweep_dir = 1;  // +1 = right to left, -1 = left to right
 static unsigned long last_servo_update = 0;
 static unsigned long last_serial_log = 0;
 static bool is_scanning_look_around = false;
@@ -194,18 +195,32 @@ void scanEnvironment() {
     }
 
     unsigned long now = millis();
-    if (now - last_servo_update < 40) {  // 25 Hz laser sampling rate
+    if (now - last_servo_update < SERVO_STEP_INTERVAL_MS) {
         return;
     }
     last_servo_update = now;
 
-    // Normal State: Park servo centered straight ahead at 90°
-    if (current_angle != 90) {
-        updateServo(90);
+    // Smooth continuous radar sweep: SERVO_MIN_ANGLE (40°) <-> SERVO_MAX_ANGLE (140°)
+    current_angle += sweep_dir * SERVO_SWEEP_STEP_DEG;
+    if (current_angle >= SERVO_MAX_ANGLE) {
+        current_angle = SERVO_MAX_ANGLE;
+        sweep_dir = -1;
+    } else if (current_angle <= SERVO_MIN_ANGLE) {
+        current_angle = SERVO_MIN_ANGLE;
+        sweep_dir = 1;
     }
 
+    updateServo(current_angle);
     current_dist = readDistance();
-    center_dist = current_dist;
+
+    // Cache directional sector clearances
+    if (current_angle <= 65) {
+        right_dist = current_dist;
+    } else if (current_angle >= 115) {
+        left_dist = current_dist;
+    } else if (abs(current_angle - 90) <= 20) {
+        center_dist = current_dist;
+    }
 
     detectObstacle();
 

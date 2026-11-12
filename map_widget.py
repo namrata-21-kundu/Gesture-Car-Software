@@ -260,12 +260,12 @@ class Map2DWidget(QWidget):
                 if -20 <= sx <= w + 20 and -20 <= sy <= h + 20:
                     painter.drawRect(QRectF(sx, sy, cell_px, cell_px))
 
-        # Draw Raw Occupied Obstacles (Bright glowing cyan blocks)
+        # Draw Raw Occupied Obstacles (High-Visibility Hazard Red/Orange Blocks)
         occ_rows, occ_cols = np.where(occupied_mask)
         if len(occ_rows) > 0:
-            occ_brush = QBrush(QColor(0, 229, 255, 220))
+            occ_brush = QBrush(QColor(239, 68, 68, 220))
             painter.setBrush(occ_brush)
-            painter.setPen(QColor(0, 229, 255, 90))
+            painter.setPen(QColor(255, 107, 107, 120))
             for r, c in zip(occ_rows, occ_cols):
                 world_x = (c - orig_x) * res
                 world_y = (orig_y - r) * res
@@ -273,6 +273,47 @@ class Map2DWidget(QWidget):
                 sy = view_cy - (world_y * px_per_cm)
                 if -20 <= sx <= w + 20 and -20 <= sy <= h + 20:
                     painter.drawRoundedRect(QRectF(sx - 1, sy - 1, cell_px + 2, cell_px + 2), 2, 2)
+
+        # ----------------------------------------------------
+        # 2B. DRAW DETECTED OBSTACLES & LIVE HAZARD PINS
+        # ----------------------------------------------------
+        now = time.time()
+        obstacles = getattr(self.mapping_engine, "detected_obstacles", [])
+        if len(obstacles) > 0:
+            font_obs = QFont("Segoe UI", 8, QFont.Bold)
+            painter.setFont(font_obs)
+
+            for obs in obstacles:
+                wx, wy = obs["x"], obs["y"]
+                d_cm = obs["dist"]
+                age = now - obs.get("time", now)
+
+                sx = view_cx + (wx * px_per_cm)
+                sy = view_cy - (wy * px_per_cm)
+
+                if -30 <= sx <= w + 30 and -30 <= sy <= h + 30:
+                    # Pulsing hazard halo for fresh detections (< 3.0s)
+                    if age < 3.0:
+                        pulse = 0.5 + 0.5 * math.sin(now * 8.0)
+                        pulse_r = 10.0 + (pulse * 8.0)
+                        alpha = int(max(20, (1.0 - (age / 3.0)) * 140))
+                        painter.setBrush(Qt.NoBrush)
+                        painter.setPen(QPen(QColor(239, 68, 68, alpha), 2, Qt.DashLine))
+                        painter.drawEllipse(QPointF(sx, sy), pulse_r, pulse_r)
+
+                    # Solid Obstacle Beacon (Crimson Red for close, Amber for medium)
+                    pin_col = QColor("#EF4444") if d_cm <= 25.0 else QColor("#F97316")
+                    painter.setBrush(QBrush(pin_col))
+                    painter.setPen(QPen(QColor("#FFFFFF"), 1.5))
+                    painter.drawEllipse(QPointF(sx, sy), 6.0, 6.0)
+
+                    # Dynamic Distance Callout Tag for Active Objects (< 5.0s)
+                    if age < 5.0:
+                        tag_txt = f"⚠️ {d_cm:.0f}cm"
+                        painter.setPen(QColor("#000000"))
+                        painter.drawText(int(sx - 15), int(sy - 9), tag_txt)  # Shadow
+                        painter.setPen(QColor("#FF4D4D") if d_cm <= 25.0 else QColor("#FBBF24"))
+                        painter.drawText(int(sx - 16), int(sy - 10), tag_txt)
 
         # ----------------------------------------------------
         # 3. DRAW ML SPATIAL MODEL LAYER (WALLS & CORRIDORS)
@@ -414,14 +455,21 @@ class Map2DWidget(QWidget):
         beam_end_x = beam_len_px * math.cos(beam_rad)
         beam_end_y = beam_len_px * math.sin(beam_rad)
 
-        painter.setPen(QPen(QColor(0, 229, 255, 200), 2, Qt.SolidLine))
+        is_hit = (self.current_sensor_dist < 195.0)
+        col_beam = QColor(239, 68, 68, 220) if is_hit else QColor(0, 229, 255, 180)
+        painter.setPen(QPen(col_beam, 2, Qt.SolidLine))
         painter.drawLine(QPointF(0, sensor_y), QPointF(beam_end_x, beam_end_y))
 
-        if self.current_sensor_dist < 195.0:
-            col_hit = QColor("#EF4444") if self.current_sensor_dist <= 15.0 else QColor("#F59E0B")
+        if is_hit:
+            col_hit = QColor("#EF4444") if self.current_sensor_dist <= 25.0 else QColor("#F59E0B")
             painter.setBrush(QBrush(col_hit))
-            painter.setPen(Qt.NoPen)
-            painter.drawEllipse(QPointF(beam_end_x, beam_end_y), 5, 5)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1))
+            painter.drawEllipse(QPointF(beam_end_x, beam_end_y), 6, 6)
+
+            # Impact target reticle
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(col_hit, 1.5, Qt.DashLine))
+            painter.drawEllipse(QPointF(beam_end_x, beam_end_y), 12, 12)
 
         painter.restore()
 
@@ -430,7 +478,7 @@ class Map2DWidget(QWidget):
         # ----------------------------------------------------
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
-        painter.drawRoundedRect(12, 12, 250, 84, 8, 8)
+        painter.drawRoundedRect(12, 12, 260, 84, 8, 8)
 
         painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
         painter.setPen(QColor("#00E5FF"))
@@ -440,8 +488,13 @@ class Map2DWidget(QWidget):
         painter.drawText(22, 44, f"HEADING: {r_heading:.0f}° | TOF LASER: {self.current_sensor_dist:.0f}cm")
 
         explored, total, pct, area_m2 = self.mapping_engine.get_explored_stats()
-        painter.setPen(QColor("#10B981"))
-        painter.drawText(22, 60, f"MAPPED AREA: {area_m2:.2f} m² ({pct:.1f}% space)")
+        n_obs = len(getattr(self.mapping_engine, "detected_obstacles", []))
+        if n_obs > 0:
+            painter.setPen(QColor("#EF4444"))
+            painter.drawText(22, 60, f"MAPPED: {area_m2:.2f}m² | ⚠️ OBSTACLES: {n_obs} PLOTTED")
+        else:
+            painter.setPen(QColor("#10B981"))
+            painter.drawText(22, 60, f"MAPPED AREA: {area_m2:.2f} m² ({pct:.1f}% space)")
 
         if self.draw_route_mode:
             painter.setPen(QColor("#F59E0B"))
