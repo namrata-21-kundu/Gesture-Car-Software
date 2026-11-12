@@ -9,6 +9,7 @@ Features:
 """
 
 import math
+import time
 import numpy as np
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPolygonF

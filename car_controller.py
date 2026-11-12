@@ -58,4 +58,18 @@ class CarController:
         self.last_sent_command = config.CMD_STOP
         self.last_send_time = time.time()
         if self.websocket_manager and self.websocket_manager.is_connected:
-            self.websocket_manager.send_command(config.CMD_STOP, self.motor_speed)
+            self.websocket_manager.send_command(config.CMD_STOP, 0)
+
+    def send_command(self, cmd, speed=None):
+        """Sends a directional movement command to ESP32 over WebSocket."""
+        target_speed = self.motor_speed if speed is None else int(speed)
+        self.active_command = cmd
+        self.last_sent_command = cmd
+        self.last_sent_speed = target_speed
+        self.last_send_time = time.time()
+        if self.websocket_manager and self.websocket_manager.is_connected:
+            self.websocket_manager.send_command(cmd, target_speed)
+
+    @property
+    def current_command(self):
+        return self.active_command
